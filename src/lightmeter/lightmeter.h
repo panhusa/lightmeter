@@ -1,3 +1,5 @@
+void refresh();
+
 void outOfrange() {
   display.println(F("--"));
 }
@@ -91,6 +93,105 @@ float measureOnce(BH1750::Mode mode, byte mtreg) {
   }
 
   return readLux(mode, mtreg);
+}
+
+/*
+  Flash metering. A flash (~1 ms) is much shorter than one sensor integration (~16 ms), so a
+  single reading is the flash energy averaged over the integration window, and a flash can be
+  split across two windows. Sum what each new reading adds above ambient and multiply by the
+  integration time to get the flash exposure in lux*s. refresh() turns that into an equivalent
+  lux for the selected shutter speed, so the aperture shown is right for flash + ambient.
+*/
+void measureFlash() {
+  lightMeter.setMTreg(BH1750_DEFAULT_MTREG);
+  lightMeter.configure(BH1750::CONTINUOUS_LOW_RES_MODE);
+
+  unsigned long startTime = millis();
+  while (!lightMeter.measurementReady(true)) {
+    delay(1);
+  }
+
+  boolean flashOverflow = 0;
+  boolean inFlash = false;
+  float ambient = -1;
+  float last = -1;
+  float flashSum = 0;
+
+  while (millis() - startTime < MaxFlashMeteringTime) {
+    float reading = readLux(BH1750::CONTINUOUS_LOW_RES_MODE, BH1750_DEFAULT_MTREG);
+    flashOverflow |= Overflow;
+
+    // Poll faster than the sensor integrates so no result is missed; the data register keeps
+    // the last result until the next one completes, so only count readings that changed.
+    if (reading != last) {
+      last = reading;
+
+      if (ambient < 0) {
+        ambient = reading;
+      } else if (reading > ambient * FlashThresholdFactor + FlashThresholdLux) {
+        flashSum += reading - ambient;
+        inFlash = true;
+      } else if (inFlash) {
+        break;  // back to ambient: the flash is over
+      } else {
+        ambient = ambient * 0.75 + reading * 0.25;
+      }
+    }
+
+    delay(2);
+  }
+
+  // Stop continuous measuring (the sensor powers down after a one-time measurement).
+  lightMeter.configure(BH1750::ONE_TIME_LOW_RES_MODE);
+
+  Overflow = flashOverflow;
+  flashExposure = flashSum * FlashIntegrationTime;
+  flashAmbient = ambient > 0 ? ambient : 0;
+}
+
+// Any button wakes the CPU: D2-D7 are PCINT18-23.
+EMPTY_INTERRUPT(PCINT2_vect);
+
+boolean anyButtonPressed() {
+  return !digitalRead(PlusButtonPin) || !digitalRead(MinusButtonPin) || !digitalRead(MeteringButtonPin) ||
+         !digitalRead(ModeButtonPin) || !digitalRead(MenuButtonPin) || !digitalRead(MeteringModeButtonPin);
+}
+
+/*
+  Power down until a button is pressed. The BH1750 is already powered down (one-time modes
+  power down after measuring), the display is switched off and the ADC disabled.
+*/
+void sleepNow() {
+  display.ssd1306_command(SSD1306_DISPLAYOFF);
+
+  PCMSK2 = bit(PCINT18) | bit(PCINT19) | bit(PCINT20) | bit(PCINT21) | bit(PCINT22) | bit(PCINT23);
+  PCIFR = bit(PCIF2);
+  PCICR |= bit(PCIE2);
+
+  byte adcsra = ADCSRA;
+  ADCSRA = 0;
+
+  set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+  noInterrupts();
+  sleep_enable();
+  sleep_bod_disable();
+  interrupts();
+  sleep_cpu();
+  sleep_disable();
+
+  PCICR &= ~bit(PCIE2);
+  ADCSRA = adcsra;
+
+  // The wake-up press only wakes the meter; wait for release so it isn't handled as a command.
+  while (anyButtonPressed()) {
+    delay(10);
+  }
+  delay(50);
+
+  display.ssd1306_command(SSD1306_DISPLAYON);
+  battVolts = getBandgap();
+  lastActivity = millis();
+  refresh();
 }
 
 /*
@@ -392,9 +493,15 @@ void refresh() {
   mainScreen = true;
   NDMenu = false;
 
+  float T = getTimeByIndex(T_expIndex);
+
+  if (meteringMode == 1 && flashExposure > 0) {
+    // Lux that gives the same exposure at shutter time T as the flash plus ambient light.
+    lux = flashExposure / T + flashAmbient;
+  }
+
   float EV = lux2ev(lux);
 
-  float T = getTimeByIndex(T_expIndex);
   float A = getApertureByIndex(apertureIndex);
   long  iso = getISOByIndex(ISOIndex);
 
@@ -707,7 +814,8 @@ void menu() {
 
   if (ModeButtonState == 0) {
     // switching between Aperture priority and Shutter Speed priority.
-    if (mainScreen) {
+    // Flash metering is shutter priority only.
+    if (mainScreen && meteringMode == 0) {
       modeIndex++;
 
       if (modeIndex > 1) {
@@ -723,9 +831,14 @@ void menu() {
     // Switch between Ambient light and Flash light metering
     if (meteringMode == 0) {
       meteringMode = 1;
+      modeIndex = 1;
     } else {
       meteringMode = 0;
     }
+
+    // A reading taken in the other mode doesn't apply.
+    lux = 0;
+    flashExposure = 0;
 
     refresh();
     delay(200);

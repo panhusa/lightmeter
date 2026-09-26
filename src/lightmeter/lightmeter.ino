@@ -33,8 +33,15 @@ BH1750 lightMeter;
 #define MaxTimeIndex            80
 #define MaxNDIndex              13
 #define MaxFlashMeteringTime    5000                    // ms
+#define FlashIntegrationTime    0.016                   // s, BH1750 low-resolution measurement time (typ.)
+#define FlashThresholdFactor    1.25                    // reading must exceed ambient by 25%...
+#define FlashThresholdLux       20                      // ...and by this many lux to count as flash
+#define SleepTimeout            60000UL                 // ms without a button press before powering down
 
 float   lux;
+float   flashExposure = 0;                              // lux*s of the last measured flash, 0 = none
+float   flashAmbient = 0;                               // ambient lux during the last flash measurement
+unsigned long lastActivity = 0;
 boolean Overflow = 0;                                   // Sensor got Saturated and Display "Overflow"
 float   ISOND;
 boolean ISOmode = 0;
@@ -119,6 +126,11 @@ void setup() {
     meteringMode = 0;
   }
 
+  if (meteringMode == 1) {
+    // Flash metering only makes sense as shutter priority (flash exposure doesn't depend on T).
+    modeIndex = 1;
+  }
+
   if (ndIndex > MaxNDIndex) {
     ndIndex = 0;
   }
@@ -135,6 +147,14 @@ void loop() {
   
   readButtons();
 
+  if (!PlusButtonState || !MinusButtonState || !MeteringButtonState ||
+      !ModeButtonState || !MenuButtonState || !MeteringModeButtonState) {
+    lastActivity = millis();
+  } else if (millis() - lastActivity >= SleepTimeout) {
+    sleepNow();
+    return;
+  }
+
   menu();
 
   if (MeteringButtonState == 0) {
@@ -142,6 +162,7 @@ void loop() {
     SaveSettings();
 
     lux = 0;
+    flashExposure = 0;
     refresh();
     
     if (meteringMode == 0) {
@@ -152,30 +173,8 @@ void loop() {
       delay(200);
     } else if (meteringMode == 1) {
       // Flash light metering
-      lightMeter.setMTreg(BH1750_DEFAULT_MTREG);
-      lightMeter.configure(BH1750::CONTINUOUS_LOW_RES_MODE);
-
-      unsigned long startTime = millis();
-      boolean flashOverflow = 0;
-      lux = 0;
-
-      while (millis() - startTime < MaxFlashMeteringTime) {
-        if (!lightMeter.measurementReady(true)) {
-          continue;
-        }
-
-        float currentLux = readLux(BH1750::CONTINUOUS_LOW_RES_MODE, BH1750_DEFAULT_MTREG);
-        flashOverflow |= Overflow;
-
-        if (currentLux > lux) {
-          lux = currentLux;
-        }
-      }
-
-      Overflow = flashOverflow;
-
-      // Stop continuous measuring (the sensor powers down after a one-time measurement).
-      lightMeter.configure(BH1750::ONE_TIME_LOW_RES_MODE);
+      measureFlash();
+      lastActivity = millis();
 
       refresh();
     }

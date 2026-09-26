@@ -48,3 +48,11 @@ arduino-cli compile -b arduino:avr:nano src/lightmeter
 ```
 
 The sensor is auto-ranged: if it saturates in ambient mode the reading is retaken at the lowest sensitivity. If it still saturates, `lx:OVER` is shown and the exposure shown is too long.
+
+### Flash metering
+
+Put the meter in flash mode (`F`), press the metering button, then fire the flash within 5 seconds. The meter adds up the light the flash adds above ambient across sensor readings, which gives the flash exposure. It then shows the aperture for the selected shutter speed, including ambient light during that time. Flash mode always works in shutter priority. Accuracy depends on the BH1750's integration time (16 ms typical), so check it against a known flash and adjust `FlashIntegrationTime` if needed.
+
+### Power saving
+
+After 60 seconds without a button press (`SleepTimeout`) the display turns off and the ATmega328 goes into power-down sleep. Any button wakes it, and the press that wakes it is ignored. The Nano's power LED and USB chip still draw current. For long battery life, remove the power LED or use a bare ATmega328/Pro Mini.
