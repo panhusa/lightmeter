@@ -22,7 +22,7 @@ Functions list:
 * Shutter speed priority
 * ISO range 8 - 4 000 000
 * Aperture range 1.0 - 3251
-* Shutter speed range 1/10000 - 133 sec
+* Shutter speed range 1/10000 sec - 133 min
 * ND Filter range ND2 - ND8192
 * Displaying amount of light in Lux.
 * Displaying exposure value, EV
@@ -31,3 +31,20 @@ Functions list:
 * Power 2xAAA LR03 batteries
 
 Detailed information on my site: https://www.pominchuk.com/lightmeter/
+
+## Building
+
+Open `src/lightmeter/lightmeter.ino` in the Arduino IDE (board: Arduino Nano, ATmega328P) and install these libraries from the Library Manager:
+
+* BH1750 by Christopher Laws, **1.3.0 or newer** (older versions have a different `readLightLevel()` API)
+* Adafruit SSD1306
+* Adafruit GFX Library
+
+Or with `arduino-cli`:
+
+```
+arduino-cli lib install "BH1750@1.3.0" "Adafruit SSD1306" "Adafruit GFX Library"
+arduino-cli compile -b arduino:avr:nano src/lightmeter
+```
+
+The sensor is auto-ranged: if it saturates in ambient mode the reading is retaken at the lowest sensitivity. If it still saturates, `lx:OVER` is shown and the exposure shown is too long.
