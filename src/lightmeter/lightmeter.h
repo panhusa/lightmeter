@@ -4,12 +4,13 @@ void outOfrange() {
 
 void SaveSettings() {
   // Save lightmeter setting into EEPROM.
-  EEPROM.write(ndIndexAddr, ndIndex);
-  EEPROM.write(ISOIndexAddr, ISOIndex);
-  EEPROM.write(modeIndexAddr, modeIndex);
-  EEPROM.write(apertureIndexAddr, apertureIndex);
-  EEPROM.write(T_expIndexAddr, T_expIndex);
-  EEPROM.write(meteringModeAddr, meteringMode);
+  // update() skips unchanged cells: this runs on every metering press and EEPROM wears out.
+  EEPROM.update(ndIndexAddr, ndIndex);
+  EEPROM.update(ISOIndexAddr, ISOIndex);
+  EEPROM.update(modeIndexAddr, modeIndex);
+  EEPROM.update(apertureIndexAddr, apertureIndex);
+  EEPROM.update(T_expIndexAddr, T_expIndex);
+  EEPROM.update(meteringModeAddr, meteringMode);
 }
 
 // Returns actual value of Vcc (x 100)
@@ -46,20 +47,64 @@ void footer() {
 }
 
 /*
-  Get light value
+  Lux value the sensor reports at its full-scale raw count (65535) for the given mode/MTreg.
+  readLightLevel() divides raw counts by 1.2, scales by 69/MTreg and halves again in *_MODE_2,
+  so e.g. ONE_TIME_HIGH_RES_MODE_2 saturates at ~27300 lx, not at 65535.
 */
-float getLux() {
-  uint16_t lux = lightMeter.readLightLevel(false);
+float sensorFullScale(BH1750::Mode mode, byte mtreg) {
+  float fullScale = 65535.0 / 1.2 * BH1750_DEFAULT_MTREG / mtreg;
 
-  if (lux >= 65534) {
-    // light sensor is overloaded.
-    Overflow = 1;
-    lux = 65535;
-  } else {
-    Overflow = 0;
+  if (mode == BH1750::ONE_TIME_HIGH_RES_MODE_2 || mode == BH1750::CONTINUOUS_HIGH_RES_MODE_2) {
+    fullScale /= 2;
   }
 
-  return lux * DomeMultiplier;             // DomeMultiplier = 2.17 (calibration)*/
+  return fullScale;
+}
+
+/*
+  Read the last completed measurement, applying the dome calibration.
+  Sets Overflow when the sensor is saturated. Returns 0 on I2C error.
+*/
+float readLux(BH1750::Mode mode, byte mtreg) {
+  float level = lightMeter.readLightLevel();
+
+  if (level < 0) {
+    // -1: I2C read failed, -2: sensor not configured.
+    Overflow = 0;
+    return 0;
+  }
+
+  Overflow = level >= sensorFullScale(mode, mtreg) * 0.999;
+
+  return level * DomeMultiplier;             // DomeMultiplier = 2.17 (calibration)
+}
+
+/*
+  Start a single measurement and wait until it's done.
+*/
+float measureOnce(BH1750::Mode mode, byte mtreg) {
+  lightMeter.setMTreg(mtreg);
+  lightMeter.configure(mode);
+
+  while (!lightMeter.measurementReady(true)) {
+    delay(5);
+  }
+
+  return readLux(mode, mtreg);
+}
+
+/*
+  Ambient light value. HIGH_RES_MODE_2 saturates at ~27k lx (below daylight levels),
+  so on saturation re-measure with the lowest sensitivity (up to ~121k lx at the sensor).
+*/
+float getLux() {
+  float lux = measureOnce(BH1750::ONE_TIME_HIGH_RES_MODE_2, BH1750_DEFAULT_MTREG);
+
+  if (Overflow) {
+    lux = measureOnce(BH1750::ONE_TIME_HIGH_RES_MODE, BH1750_MTREG_MIN);
+  }
+
+  return lux;
 }
 
 float log2(float x) {
@@ -105,7 +150,11 @@ float getApertureByIndex(uint8_t indx) {
     f = 22;
   } else if (f >= 24 && f < 28) {
     f = 25;
-  } else if (f >= 28 && f < 40) {
+  } else if (f >= 28 && f < 30) {
+    f = 29;
+  } else if (f >= 30 && f < 34) {
+    f = 32;
+  } else if (f >= 34 && f < 40) {
     f = 36;
   } else if (f >= 40 && f < 45) {
     f = 40;
@@ -126,7 +175,7 @@ float getApertureByIndex(uint8_t indx) {
 
 // Return ISO value (100, 200, 400, ...) by index in sequence (0, 1, 2, 3, ...).
 long getISOByIndex(uint8_t indx) {
-  if (indx < 0 || indx > MaxISOIndex) {
+  if (indx > MaxISOIndex) {
     indx = 0;
   }
 
@@ -192,7 +241,7 @@ float getMinDistance(float x, float v1, float v2) {
 }
 
 float getTimeByIndex(uint8_t indx) {
-  if (indx < 0 || indx >= MaxTimeIndex) {
+  if (indx >= MaxTimeIndex) {
     indx = 0;
   }
 
@@ -254,7 +303,7 @@ float getTimeByIndex(uint8_t indx) {
 double fixTime(double t) {
   double divider = 1;
 
-  float maxTime = getTimeByIndex(MaxTimeIndex);
+  float maxTime = getTimeByIndex(0);          // fastest shutter speed
 
   if (t < maxTime) {
     return maxTime;
@@ -366,7 +415,7 @@ void refresh() {
       T = fixTime(100 * pow(A, 2) / ISOND / pow(2, EV)); //T = exposure time, in seconds
 
       // Calculating shutter speed index for correct menu navigation.
-      for (int i = 0; i <= MaxTimeIndex; i++) {
+      for (int i = 0; i < MaxTimeIndex; i++) {
         if (T == getTimeByIndex(i)) {
           T_expIndex = i;
           break;
@@ -475,7 +524,12 @@ void refresh() {
 
   display.setCursor(72, 1);
   display.print(F("lx:"));
-  display.print(lux, 0);
+  if (Overflow) {
+    // Sensor saturated: the reading (and everything derived from it) is too low.
+    display.print(F("OVER"));
+  } else {
+    display.print(lux, 0);
+  }
 
   display.drawLine(95, linePos[0] - 1, 95, linePos[0] + 17, WHITE); // LINE DIVISOR
   display.setTextSize(1);
@@ -701,7 +755,7 @@ void menu() {
         // increase time
         T_expIndex++;
 
-        if (T_expIndex > MaxTimeIndex) {
+        if (T_expIndex >= MaxTimeIndex) {
           T_expIndex = 0;
         }
       } else if (MinusButtonState == 0) {
@@ -709,7 +763,7 @@ void menu() {
         if (T_expIndex > 0) {
           T_expIndex--;
         } else {
-          T_expIndex = MaxTimeIndex;
+          T_expIndex = MaxTimeIndex - 1;
         }
       }
     }

@@ -2,7 +2,7 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include <BH1750.h>
+#include <BH1750.h>             // requires BH1750 library >= 1.3.0 (claws/BH1750)
 #include <EEPROM.h>
 #include <avr/sleep.h>
 
@@ -14,6 +14,10 @@
 Adafruit_SSD1306 display(OLED_MOSI, OLED_CLK, OLED_DC, OLED_RESET, OLED_CS);
 
 BH1750 lightMeter;
+
+#ifndef BH1750_MTREG_MIN
+#error "BH1750 library 1.3.0 or newer is required"
+#endif
 
 #define DomeMultiplier          2.17                    // Multiplier when using a white translucid Dome covering the lightmeter
 #define MeteringButtonPin       2                       // Metering button pin
@@ -69,7 +73,7 @@ uint8_t ndIndex =           EEPROM.read(ndIndexAddr);
 
 int battVolts;
 #define batteryInterval 10000
-double lastBatteryTime = 0;
+unsigned long lastBatteryTime = 0;
 
 #include "lightmeter.h"
 
@@ -102,11 +106,11 @@ void setup() {
     ISOIndex = defaultISOIndex;
   }
 
-  if (T_expIndex > MaxTimeIndex) {
+  if (T_expIndex >= MaxTimeIndex) {
     T_expIndex = defaultT_expIndex;
   }
 
-  if (modeIndex < 0 || modeIndex > 1) {
+  if (modeIndex > 1) {
     // Aperture priority. Calculating shutter speed.
     modeIndex = 0;
   }
@@ -124,7 +128,7 @@ void setup() {
 }
 
 void loop() {  
-  if (millis() >= lastBatteryTime + batteryInterval) {
+  if (millis() - lastBatteryTime >= batteryInterval) {
     lastBatteryTime = millis();
     battVolts = getBandgap();
   }
@@ -142,38 +146,36 @@ void loop() {
     
     if (meteringMode == 0) {
       // Ambient light meter mode.
-      lightMeter.configure(BH1750::ONE_TIME_HIGH_RES_MODE_2);
-
       lux = getLux();
-
-      if (Overflow == 1) {
-        delay(10);
-        getLux();
-      }
 
       refresh();
       delay(200);
     } else if (meteringMode == 1) {
       // Flash light metering
+      lightMeter.setMTreg(BH1750_DEFAULT_MTREG);
       lightMeter.configure(BH1750::CONTINUOUS_LOW_RES_MODE);
 
       unsigned long startTime = millis();
-      uint16_t currentLux = 0;
+      boolean flashOverflow = 0;
       lux = 0;
 
-      while (true) {
-        // check max flash metering time
-        if (startTime + MaxFlashMeteringTime < millis()) {
-          break;
+      while (millis() - startTime < MaxFlashMeteringTime) {
+        if (!lightMeter.measurementReady(true)) {
+          continue;
         }
 
-        currentLux = getLux();
-        delay(16);
-        
+        float currentLux = readLux(BH1750::CONTINUOUS_LOW_RES_MODE, BH1750_DEFAULT_MTREG);
+        flashOverflow |= Overflow;
+
         if (currentLux > lux) {
           lux = currentLux;
         }
       }
+
+      Overflow = flashOverflow;
+
+      // Stop continuous measuring (the sensor powers down after a one-time measurement).
+      lightMeter.configure(BH1750::ONE_TIME_LOW_RES_MODE);
 
       refresh();
     }
